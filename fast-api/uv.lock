@@ -800,6 +800,7 @@ dependencies = [
     { name = "fastapi", extra = ["standard"] },
     { name = "google-genai" },
     { name = "httpx" },
+    { name = "pydantic-settings" },
     { name = "pypdf" },
     { name = "reportlab" },
 ]
@@ -810,6 +811,7 @@ requires-dist = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.124.4" },
     { name = "google-genai", specifier = ">=1.60.0" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "pydantic-settings", specifier = ">=2.13.1" },
     { name = "pypdf", specifier = ">=6.4.2" },
     { name = "reportlab", specifier = ">=4.4.9" },
 ]

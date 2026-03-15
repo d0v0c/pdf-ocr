@@ -8,6 +8,7 @@ dependencies = [
     "fastapi[standard]>=0.124.4",
     "google-genai>=1.60.0",
     "httpx>=0.28.1",
+    "pydantic-settings>=2.13.1",
     "pypdf>=6.4.2",
     "reportlab>=4.4.9",
 ]
