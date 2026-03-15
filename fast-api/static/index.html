@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF 识别解析提取</title>
+    <style>
+        :root {
+            --primary-color: #4a90e2;
+            --primary-hover: #357abd;
+            --bg-color: #f5f7fa;
+            --surface-color: #ffffff;
+            --text-color: #333333;
+            --border-color: #e1e4e8;
+            --error-bg: #fadbd8;
+            --error-text: #c0392b;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 1200px;
+            background: var(--surface-color);
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            position: relative;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #2c3e50;
+        }
+
+        /* 拖拽区域样式 */
+        .drop-zone {
+            border: 2px dashed var(--border-color);
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background-color: #fafafa;
+        }
+
+        /* === 右上角模式切换按钮样式 === */
+        .mode-switch {
+            position: absolute;
+            top: 25px;
+            right: 30px;
+            padding: 8px 20px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: bold;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            z-index: 5;
+            outline: none;
+        }
+
+        .mode-switch:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }
+
+        /* 状态一：免费 (绿色) */
+        .mode-free {
+            background-color: #2ecc71; /* 鲜艳的绿色 */
+        }
+        .mode-free:hover {
+            background-color: #27ae60;
+        }
+
+        /* 状态二：收费 (橙色) */
+        .mode-paid {
+            background-color: #f39c12; /* 鲜艳的橙色 */
+        }
+        .mode-paid:hover {
+            background-color: #e67e22;
+        }
+
+        /* 移动端适配：防止按钮盖住标题 */
+        @media (max-width: 600px) {
+            .mode-switch {
+                position: relative;
+                top: 0;
+                right: 0;
+                display: block;
+                margin: 0 auto 15px auto;
+                width: fit-content;
+            }
+        }
+
+        .drop-zone:hover,
+        .drop-zone.dragover {
+            border-color: var(--primary-color);
+            background-color: #eef7ff;
+        }
+
+        .drop-zone p {
+            font-size: 1.1em;
+            color: #7f8c8d;
+            margin: 10px 0;
+        }
+
+        .drop-zone input[type="file"] {
+            display: none;
+        }
+
+        /* 加载动画覆盖层 */
+        .loader-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.9);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+            border-radius: 12px;
+            display: none;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid var(--primary-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* 结果区域 */
+        #result-area {
+            display: none;
+            margin-top: 20px;
+        }
+
+        /* 全局错误提示框样式 */
+        .error-alert {
+            display: none; /* 默认隐藏 */
+            background-color: var(--error-bg);
+            color: var(--error-text);
+            border: 1px solid #f5b7b1;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+            text-align: center;
+            font-weight: 500;
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .toolbar {
+            display: flex;
+            justify-content: flex-start;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid var(--border-color);
+            gap: 20px;
+        }
+
+        .btn {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+        }
+
+        .btn:hover {
+            background-color: var(--primary-hover);
+        }
+
+        /* 状态提示文本样式 */
+        #statusMsg {
+            font-size: 14px;
+            font-weight: 600;
+            padding: 8px 15px;
+            border-radius: 6px;
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .status-success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .status-warning {
+            background-color: #fdecea;
+            color: #c0392b;
+            border: 1px solid #fadbd8;
+        }
+
+        /* 表格样式 */
+        .table-wrapper {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        th,
+        td {
+            border: 1px solid var(--border-color);
+            padding: 10px;
+            text-align: left;
+        }
+
+        th {
+            background-color: #f8f9fa;
+            font-weight: 600;
+            color: #2c3e50;
+            white-space: nowrap;
+        }
+
+        /* 可编辑单元格样式 */
+        td[contenteditable="true"] {
+            background-color: #fff;
+            cursor: text;
+        }
+
+        td[contenteditable="true"]:hover {
+            background-color: #fdfdfd;
+            box-shadow: inset 0 0 0 1px var(--primary-color);
+        }
+
+        td[contenteditable="true"]:focus {
+            outline: 2px solid var(--primary-color);
+            outline-offset: -2px;
+            background-color: #fff;
+            z-index: 2;
+            position: relative;
+        }
+
+        /* === 错误时的红色高亮样式 === */
+        /* 列错误（总价不对） */
+        .col-error {
+            background-color: #fadbd8 !important;
+            color: #c0392b;
+            font-weight: bold;
+        }
+
+        th.col-error {
+            background-color: #e6b0aa !important;
+            color: #922b21;
+        }
+
+        /* 行错误（数量*单价!=小计） */
+        .row-error-cell {
+            background-color: #fff5e6 !important;
+            color: #d35400;
+            outline: 1px solid #e67e22;
+        }
+
+        #statusMsg {
+             transition: all 0.3s;
+        }
+
+        /* Toast 提示 */
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #333;
+            color: #fff;
+            padding: 10px 20px;
+            border-radius: 20px;
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        .toast.show {
+            opacity: 1;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <button id="modeSwitch" class="mode-switch mode-free">免费</button>
+        <h1>PDF 识别解析提取</h1>
+
+        <div class="drop-zone" id="dropZone">
+            <p>📄 点击 或将 PDF 文件拖拽至此上传</p>
+            <input type="file" id="fileInput" accept=".pdf">
+        </div>
+
+        <div id="globalError" class="error-alert"></div>
+
+        <div id="result-area">
+            <div class="toolbar">
+                <button class="btn" id="copyBtn">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    复制表格内容 (无表头/无首列)
+                </button>
+                <span id="statusMsg"></span>
+            </div>
+
+            <div class="table-wrapper">
+                <table id="dataTable">
+                    <thead>
+                    </thead>
+                    <tbody>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="loader-overlay" id="loader">
+            <div style="text-align: center;">
+                <div class="spinner" style="margin: 0 auto 15px;"></div>
+                <p>正在识别解析 PDF，请稍候...</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast">已复制到剪贴板！</div>
+
+    <script>
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const loader = document.getElementById('loader');
+        const resultArea = document.getElementById('result-area');
+        const dataTable = document.getElementById('dataTable');
+        const statusMsg = document.getElementById('statusMsg');
+        const copyBtn = document.getElementById('copyBtn');
+        const toast = document.getElementById('toast');
+        const globalError = document.getElementById('globalError'); // 获取错误显示元素
+        const modeSwitch = document.getElementById('modeSwitch'); // // 获取按钮元素
+
+        const COL_KEYS = {
+            QTY: "数量",
+            PRICE: "单价",
+            SUBTOTAL: "小计",
+            TOTAL: "总价"
+        };
+
+        // 1. 拖拽与上传逻辑
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+        dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length) handleUpload(files[0]);
+        });
+        fileInput.addEventListener('change', (e) => {
+            if (fileInput.files.length) handleUpload(fileInput.files[0]);
+        });
+
+        // 模式切换逻辑
+        let isPaidMode = false; // 默认为免费模式 (false)
+
+        modeSwitch.addEventListener('click', () => {
+            isPaidMode = !isPaidMode; // 切换状态
+
+            if (isPaidMode) {
+                // 切换到收费状态
+                modeSwitch.textContent = '收费';
+                modeSwitch.classList.remove('mode-free');
+                modeSwitch.classList.add('mode-paid');
+            } else {
+                // 切换到免费状态
+                modeSwitch.textContent = '免费';
+                modeSwitch.classList.remove('mode-paid');
+                modeSwitch.classList.add('mode-free');
+            }
+        });
+
+        async function handleUpload(file) {
+            if (file.type !== 'application/pdf') {
+                showError('请上传 PDF 文件');
+                return;
+            }
+
+            // 重置状态
+            loader.style.display = 'flex';
+            dropZone.style.pointerEvents = 'none';
+            resultArea.style.display = 'none'; // 隐藏上一次的结果
+            globalError.style.display = 'none'; // 隐藏上一次的错误
+
+            const formData = new FormData();
+            formData.append('file', file);
+            // === 将当前付费模式发送给后端 ===
+            // 字段名可以是 'mode', 'type', 'is_paid' 等，根据你后端的定义
+            // 这里传字符串 'paid' 或 'free'
+            formData.append('is_paid', isPaidMode ? 'paid' : 'free');
+
+            try {
+                const response = await fetch('/api/pdf-extract', { method: 'POST', body: formData });
+
+                // === 修改点：增强错误处理，读取后端 JSON 错误信息 ===
+                if (!response.ok) {
+                    let errorMessage = '上传失败: ' + response.statusText;
+                    try {
+                        // 尝试解析后端返回的 JSON 错误信息
+                        const errorData = await response.json();
+                        // 兼容 FastAPI 的 HTTPException 格式 {"detail": "..."}
+                        if (errorData.detail) {
+                            errorMessage = `错误: ${errorData.detail}`;
+                        } else if (errorData.message) {
+                            errorMessage = `错误: ${errorData.message}`;
+                        }
+                    } catch (e) {
+                        // 解析 JSON 失败，保持默认的 statusText
+                        console.warn("无法解析错误响应 JSON", e);
+                    }
+                    throw new Error(errorMessage);
+                }
+
+                const data = await response.json();
+                renderResult(data);
+                loader.style.display = 'none';
+
+                if (data.filename) await triggerDownload(data.filename);
+            } catch (error) {
+                console.error(error);
+                // 显示错误到界面
+                showError(error.message);
+                loader.style.display = 'none';
+            } finally {
+                dropZone.style.pointerEvents = 'auto';
+                fileInput.value = '';
+            }
+        }
+
+        // === 新增：显示错误信息的辅助函数 ===
+        function showError(msg) {
+            globalError.textContent = msg;
+            globalError.style.display = 'block';
+            // 可以选择是否保留 alert，为了用户体验建议保留页面内显示即可，或者两者都有
+            // alert(msg);
+        }
+
+        async function triggerDownload(filename) {
+            const url = `/api/pdf-download/${filename}`;
+            if ('showSaveFilePicker' in window) {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: filename,
+                        types: [{ description: 'PDF Document', accept: { 'application/pdf': ['.pdf'] }, }],
+                    });
+
+                    const resp = await fetch(url);
+                    if (!resp.ok) throw new Error('下载文件失败');
+                    const blob = await resp.blob();
+
+                    const writable = await handle.createWritable();
+                    await writable.write(blob);
+                    await writable.close();
+                    return;
+                } catch (err) {
+                    if (err.name !== 'AbortError') {
+                        console.warn("新版API下载失败，切换回传统下载。错误原因:", err);
+                    }
+                    if (err.name === 'AbortError') return;
+                }
+            }
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        // 2. 渲染表格逻辑
+        function renderResult(data) {
+            dataTable.querySelector('thead').innerHTML = '';
+            dataTable.querySelector('tbody').innerHTML = '';
+
+            const tableData = data.table;
+
+            if (!tableData || tableData.length === 0) {
+                showError("解析成功，但未在 PDF 中找到有效表格数据。");
+                return;
+            }
+
+            const headers = Object.keys(tableData[0]);
+
+            // 渲染表头
+            const theadTr = document.createElement('tr');
+            headers.forEach(header => {
+                const th = document.createElement('th');
+                th.textContent = header;
+                th.setAttribute('data-key', header);
+                theadTr.appendChild(th);
+            });
+            dataTable.querySelector('thead').appendChild(theadTr);
+
+            // 渲染内容
+            const tbody = dataTable.querySelector('tbody');
+            tableData.forEach(row => {
+                const tr = document.createElement('tr');
+                headers.forEach(header => {
+                    const td = document.createElement('td');
+                    td.textContent = row[header];
+                    td.contentEditable = "true";
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
+
+            resultArea.style.display = 'block';
+
+            bindTableEvents(headers);
+            revalidateTable(headers);
+        }
+
+        // === 绑定表格编辑事件 ===
+        function bindTableEvents(headers) {
+            const tbody = dataTable.querySelector('tbody');
+            const totalColIndex = headers.indexOf(COL_KEYS.TOTAL);
+
+            tbody.oninput = function(e) {
+                const targetCell = e.target;
+                const row = targetCell.parentElement;
+                const colIndex = Array.from(row.children).indexOf(targetCell);
+
+                if (colIndex === totalColIndex && totalColIndex !== -1) {
+                    const newValue = targetCell.innerText;
+                    const allRows = tbody.querySelectorAll('tr');
+                    allRows.forEach(tr => {
+                        if (tr.children[colIndex] !== targetCell) {
+                            tr.children[colIndex].innerText = newValue;
+                        }
+                    });
+                }
+                revalidateTable(headers);
+            };
+        }
+
+        // === 核心校验逻辑 ===
+        function revalidateTable(headers) {
+            const tbody = dataTable.querySelector('tbody');
+            const rows = tbody.querySelectorAll('tr');
+            const theadThs = dataTable.querySelectorAll('thead th');
+
+            const idxQty = headers.indexOf(COL_KEYS.QTY);
+            const idxPrice = headers.indexOf(COL_KEYS.PRICE);
+            const idxSub = headers.indexOf(COL_KEYS.SUBTOTAL);
+            const idxTotal = headers.indexOf(COL_KEYS.TOTAL);
+
+            let rowErrorsCount = 0;
+            let calculatedTotalSum = 0;
+            let displayTotal = 0;
+
+            const parseNum = (str) => {
+                const cleanStr = str.replace(/[^\d.-]/g, '');
+                const num = parseFloat(cleanStr);
+                return isNaN(num) ? 0 : num;
+            };
+
+            rows.forEach(row => {
+                const cells = row.querySelectorAll('td');
+
+                if (idxQty !== -1) cells[idxQty].classList.remove('row-error-cell');
+                if (idxPrice !== -1) cells[idxPrice].classList.remove('row-error-cell');
+                if (idxSub !== -1) cells[idxSub].classList.remove('row-error-cell');
+
+                if (idxQty !== -1 && idxPrice !== -1 && idxSub !== -1) {
+                    const qty = parseNum(cells[idxQty].innerText);
+                    const price = parseNum(cells[idxPrice].innerText);
+                    const sub = parseNum(cells[idxSub].innerText);
+
+                    const expectedSub = qty * price;
+                    const diff = Math.abs(expectedSub - sub);
+
+                    if (diff > 0.05) {
+                        rowErrorsCount++;
+                        cells[idxQty].classList.add('row-error-cell');
+                        cells[idxPrice].classList.add('row-error-cell');
+                        cells[idxSub].classList.add('row-error-cell');
+                    }
+                    calculatedTotalSum += sub;
+                }
+
+                if (idxTotal !== -1 && displayTotal === 0) {
+                    displayTotal = parseNum(cells[idxTotal].innerText);
+                }
+            });
+
+            let totalError = false;
+            if (idxTotal !== -1) {
+                theadThs[idxTotal].classList.remove('col-error');
+                rows.forEach(row => row.children[idxTotal].classList.remove('col-error'));
+
+                const totalDiff = Math.abs(calculatedTotalSum - displayTotal);
+
+                if (totalDiff > 0.05) {
+                    totalError = true;
+                    theadThs[idxTotal].classList.add('col-error');
+                    rows.forEach(row => row.children[idxTotal].classList.add('col-error'));
+                }
+            }
+            updateStatusMsg(rowErrorsCount, totalError);
+        }
+
+        function updateStatusMsg(rowErrors, totalError) {
+            statusMsg.className = '';
+            if (rowErrors === 0 && !totalError) {
+                statusMsg.classList.add('status-success');
+                statusMsg.innerHTML = `✅ 数据校验正确`;
+            } else {
+                statusMsg.classList.add('status-warning');
+                let msgs = [];
+                if (rowErrors > 0) msgs.push(`${rowErrors} 行小计计算错误`);
+                if (totalError) msgs.push(`总价与小计之和不符`);
+                statusMsg.innerHTML = `⚠️ 数据异常: ${msgs.join('，')}`;
+            }
+        }
+
+        // 3. 复制逻辑
+        copyBtn.addEventListener('click', () => {
+            const rows = dataTable.querySelectorAll('tbody tr');
+            let clipboardText = "";
+            rows.forEach((row) => {
+                const cells = row.querySelectorAll('th, td');
+                let rowText = [];
+                for (let i = 1; i < cells.length; i++) {
+                    rowText.push(cells[i].innerText.trim());
+                }
+                clipboardText += rowText.join('\t') + '\n';
+            });
+            navigator.clipboard.writeText(clipboardText).then(showToast).catch(() => alert('复制失败'));
+        });
+
+        function showToast() {
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 2000);
+        }
+    </script>
+
+</body>
+</html>

@@ -1,32 +1,76 @@
-# 直接用 Baidu API 识别
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+# 直接用 Gemini API 识别
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.responses import FileResponse
 from pypdf import PdfReader, PdfWriter
-import base64
-import requests
 import io
-import os
 import math
 import json
 import re
 import uvicorn
-import time
 from reportlab.pdfgen import canvas
 import asyncio
-import httpx
 from datetime import datetime, timedelta, timezone
+from config import settings
+from pathlib import Path
+from google import genai
+from google.genai import types
 
-API_KEY = os.getenv("BAIDU_API_KEY")
-SECRET_KEY = os.getenv("BAIDU_SECRET_KEY")
-TEMP_PDF = "./temp_pdfs"
+GOOGLE_API_KEY_FREE = settings.google_api_key_free
+GOOGLE_API_KEY_PAID = settings.google_api_key_paid
+client_free = genai.Client(api_key=GOOGLE_API_KEY_FREE)
+client_paid = genai.Client(api_key=GOOGLE_API_KEY_PAID)
+
+TEMP_PDF = Path("./temp_pdfs").resolve()
+TEMP_PDF.mkdir(parents=True, exist_ok=True)
+
+PROMPTS = {
+    0: """
+        Analyze the PDF and extract the following details into a JSON object.
+        
+        Extraction Rules:
+        1. contract_id: Extract the "Seller contract No" (above the table).
+        2. item_table: Parse the table.
+           - Exclude the header row: Ignore the row containing column names such as "Name", "Quantity", "Net Price" at the top of table.
+           - Ignore the bottom summary row that spans across all columns.
+           - Extract each content row as an array: [No, Name, Name of commodity and specification, Quantity, Net Price, Total net price, Remark].
+           - Handling Blank Cells: If a cell is originally empty, put "" in it.
+           - Handling Vertical Merged Cells: If a cell spans multiple rows, repeat the value in each corresponding row.
+           - Format: Pipe-separated Markdown table, a SINGLE STRING containing the entire table.
+        3. total_value: Extract the "Total value" (below the table).
+        4. address: Extract the content text from clause "5. Form of shipment and destination".
+        5. box_2d: Find the bounding box for "working days" at the right bottom. Return [ymin, xmin, ymax, xmax].
+        
+        Output Format:
+        Return strictly valid JSON. Keep the extracted content original (Chinese).
+        """,
+    1: """
+        Analyze the PDF and extract the following details into a JSON object.
+        1. customer_name: Extract the "最终用户名称" at the bottom. If it is empty, return "未知".
+        2. box_2d: Find the bounding box for "The Company" at the right bottom under "Buyer". Return [ymin, xmin, ymax, xmax].
+        Return strictly valid JSON. Keep the extracted content original (Chinese).
+        """,
+    "default": """
+        Analyze the PDF and extract the following details into a JSON object.
+        box_2d: Find the bounding box of the bottom-most text located in the right side of the page. 
+            - Exclude Footers: Ignore page numbers, technical markers or company info at the very bottom edge.
+            - Avoid Occlusion: The text must be not overlapped by any stamp or seal.
+            - Clearance: There must be a vertical or horizontal gap (at least 10% of the page width) between this text and existing stamp. If the text is too close to the stamp, choose a text a little bit up or right.
+            - Output: Return the result as box_2d in [ymin, xmin, ymax, xmax].
+        Return strictly valid JSON. Keep the extracted content original (Chinese).
+        """
+}
 
 app = FastAPI(
     docs_url=None,    # 关闭 /docs (Swagger UI)
     redoc_url=None,   # 关闭 /redoc (ReDoc)
-    openapi_url=None,  # 关闭 /openapi.json
+    openapi_url=None, # 关闭 /openapi.json
     debug=False
 )
 # app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get('/favicon.ico', include_in_schema=False)
+async def favicon():
+    return FileResponse("static/favicon.png")
 
 @app.get("/ppp-ddd-fff")
 async def index():
@@ -34,8 +78,8 @@ async def index():
 
 @app.get("/api/pdf-download/{filename}")
 def download_pdf(filename: str, background_tasks: BackgroundTasks):
-    file_path = os.path.join(TEMP_PDF, filename)
-    if not os.path.exists(file_path):
+    file_path = TEMP_PDF / filename
+    if not file_path.exists():
         return {"error": "文件不存在或已过期"}
 
     # FastAPI 会在响应发送完毕后，执行这个函数
@@ -49,7 +93,13 @@ def download_pdf(filename: str, background_tasks: BackgroundTasks):
 
 
 @app.post("/api/pdf-extract")
-async def extract_pdf(file: UploadFile = File(...)):
+async def extract_pdf(file: UploadFile = File(...), is_paid: str = Form(...)):
+    print(f"接收到的模式: {is_paid}")  # 输出: "paid" 或 "free"
+    if is_paid == "paid":
+        current_client = client_paid
+    else:
+        current_client = client_free
+
     # 验证文件
     if file.size and file.size > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="PDF 过大，不能超过 10MB")
@@ -61,119 +111,25 @@ async def extract_pdf(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="文件损坏或无法读取")
     if len(reader.pages) < 2:
         raise HTTPException(status_code=400, detail="PDF 只有一页")
-    # pyPDF 提取pdf第一页
-    p1_base64 = pdf_page_to_base64(reader.pages[0])
-    p2_base64 = pdf_page_to_base64(reader.pages[1])
 
-    # 识别
-    timeout_config = httpx.Timeout(60.0, connect=10.0)
-    async with httpx.AsyncClient(timeout=timeout_config) as client:
-        task1 = call_baidu_ocr(client, p1_base64, {'recg_tables': 'true'})
-        task2 = call_baidu_ocr(client, p2_base64, {})
 
-        # asyncio.gather 同时发射 task1 和 task2 请求并等待结果
-        data, data2 = await asyncio.gather(task1, task2)
+    # 识别 pyPDF，分页提取 PDF
+    tasks = []
+    for i, page in enumerate(reader.pages):
+        p_bytes = pdf_page_to_bytes(page)
+        tasks.append(call_gemini(p_bytes, i, current_client))
+
+    results_list = await asyncio.gather(*tasks)
+
 
     # 提取
-    contract_id = ''
-    item_table = []
-    total_value = 0.0
-    address = ''
-    customer_name = ''
+    contract_id = results_list[0].get('contract_id')
+    item_table = parse_markdown_table(results_list[0].get("item_table"))
+    total_value = to_clean_float(results_list[0].get('total_value'))
+    address = results_list[0].get('address')
+    customer_name = results_list[1].get('customer_name')
+    box_2d_list = [res.get('box_2d') for res in results_list]
 
-    # with open('./b-baidu.json', 'r') as f:
-    #     data_str = f.read()
-    #     data = json.loads(data_str)
-    # with open('./b-baidu2.json', 'r') as f:
-    #     data2_str = f.read()
-    #     data2 = json.loads(data2_str)
-
-    results = data2['results']
-    for i, item in enumerate(results):
-        text = item['words']['word']
-        if "最终用户名称" in text:
-            customer_name = str(text).split('：')[-1].strip()
-            if not customer_name and i + 1 < len(results):
-                customer_name = results[i + 1]['words']['word'].strip()
-            break
-
-    # 从 tables_result 提取 item_table、total_value
-    table_body = data['tables_result'][0]['body']
-    temp_row = []
-    for cell in table_body:
-        # 过滤表头
-        if cell['row_start'] == 0:
-            continue
-        # 过滤表尾，提取 total_value
-        elif cell['col_end'] - cell['col_start'] > 1:
-            total_value_str = str(cell['words']).split('\n')[-1]
-            match = re.search(r'[\d,]+\.\d{2}', total_value_str)
-            if match: total_value = float(match.group().replace(',', ''))
-            item_table.append(temp_row)
-        # 碰到第一列，就把这一行放入二维数组
-        elif cell['col_start'] == 0 and cell['row_start'] > 1:
-            item_table.append(temp_row)
-            temp_row = [cell['words']]
-        # 碰到普通格，就慢慢拼成一行
-        else:
-            temp_row.append(cell['words'].replace('\n', ' '))
-
-    # 从 results 提取 contract_id、address
-    anchor_upper = ''
-    anchor_upper_top = 0
-    anchor_upper_right = 0
-    anchor_lower = ''
-    anchor_lower_top = 0
-    doc_body = data['results']
-    for item in doc_body:
-        text = item['words']['word']
-        # contract_id 在页面上方，包含"/"
-        if (item['words']['words_location']['top'] < 100) and ("/" in text):
-            contract_id = text
-        elif "运输方式及到达站" in text:
-            loc = item['words']['words_location']
-            anchor_upper_top = loc['top']
-            anchor_upper_right = loc['left'] + loc['width']
-            anchor_upper = text
-        elif "shipment" in text:
-            anchor_lower_top = item['words']['words_location']['top']
-            anchor_lower = text
-    # if anchor_upper != '' and anchor_lower != '':
-    #     for item in doc_body:
-    #         loc = item['words']['words_location']
-    #         # address 比`运输方式`低，比`shipment`高，在`运输方式`右边
-    #         if (loc['top'] > anchor_upper_top - 5) and (loc['top'] < anchor_lower_top + 5):
-    #             if anchor_upper_right < loc['left']:
-    #                 address = item['words']['word']
-                    # print(f"address_top {loc['top']} \t-- {address} left {loc['left']}")
-
-    matched_parts = []  # 用于暂时存储符合条件的片段
-    if anchor_upper != '' and anchor_lower != '':
-        for item in doc_body:
-            loc = item['words']['words_location']
-            # 保持原有的位置判断逻辑
-            # address 比`运输方式`低，比`shipment`高
-            if (loc['top'] > anchor_upper_top - 5) and (loc['top'] < anchor_lower_top + 5):
-                # 在`运输方式`右边
-                if anchor_upper_right < loc['left']:
-                    # 将文本和其左边距(用于排序)作为一个字典存入列表
-                    matched_parts.append({
-                        "text": item['words']['word'],
-                        "top": loc['top']
-                    })
-    # 处理收集到的片段
-    if matched_parts:
-        # 1. 排序：根据 'left' 坐标从小到大排序（从左到右阅读习惯）
-        matched_parts.sort(key=lambda x: x['top'])
-        # 2. 拼接：将所有文本提取出来拼接在一起
-        # 注意：如果单词之间需要空格，请将 "" 改为 " "
-        address = "".join([part['text'] for part in matched_parts])
-        print(f"提取到的完整地址: {address}")
-
-
-    if address == '':
-        address = anchor_upper + anchor_lower
-        address = address.replace(' ', '').replace(':', '').replace('：', '').replace('5.运输方式及到达站（港）', '').replace('Formofshipmentanddestination', '')
 
     # 处理一下需要特殊处理的字符
     is_value_correct = "总价正确"
@@ -215,11 +171,11 @@ async def extract_pdf(file: UploadFile = File(...)):
             "总价": total_value,
             "票款": "",
             "最终用户名称": customer_name,
-            "占位1": "",
-            "占位2": "",
-            "占位3": "",
-            "占位4": "",
-            "占位5": "",
+            "占": "",
+            "位": "",
+            "空": "",
+            "白": "",
+            "列": "",
             "备注": row[6],
             "地址": address
         }
@@ -227,7 +183,7 @@ async def extract_pdf(file: UploadFile = File(...)):
     ]
 
     # 盖章
-    filename = stamp_pdf(reader, contract_id, customer_name, total_value)
+    filename = stamp_pdf(reader, contract_id, customer_name, total_value, box_2d_list)
 
     return {
         "table": final_data,
@@ -235,33 +191,64 @@ async def extract_pdf(file: UploadFile = File(...)):
         "filename": filename
     }
 
-def pdf_page_to_base64(page_obj):
-    """PDF 页面转为 Base64 字符串"""
+def pdf_page_to_bytes(page):
+    """PDF 页面转为 二进制文件流"""
     writer = PdfWriter()
-    writer.add_page(page_obj)
+    writer.add_page(page)
     # 在内存里准备一个“临时容器”
-    with io.BytesIO() as temp_buffer:
-        writer.write(temp_buffer)
-        b64_str = base64.b64encode(temp_buffer.getvalue()).decode("utf-8")
-    return b64_str
+    temp_buffer = io.BytesIO()
+    writer.write(temp_buffer)
+    return temp_buffer.getvalue()
+
+def parse_markdown_table(text):
+    if not text:
+        return []
+
+    rows = []
+    lines = text.strip().split('\n')
+
+    for line in lines:
+        line = line.strip()
+
+        # 1. 过滤干扰行
+        if "---" in line:
+            continue
+        if "|" not in line:
+            continue
+
+        # 2. 核心解析逻辑
+        # .strip('|') -> 去掉行首和行尾的 '|' (避免 split 出来空字符串)
+        # c.strip()   -> 去掉每个单元格内容的空格 (例如 "  螺丝  " -> "螺丝")
+        cells = [c.strip() for c in line.strip('|').split('|')]
+
+        rows.append(cells)
+
+    return rows
 
 
-async def call_baidu_ocr(client: httpx.AsyncClient, base64_content: str, extra_params: dict = None):
-    url = "https://aip.baidubce.com/rest/2.0/ocr/v1/doc_analysis_office"
-    params = {"access_token": get_access_token()}  # access_token 建议放在 URL 参数里
-    data = {
-        'pdf_file': base64_content,
-        'erase_seal': 'true'
-    }
-    if extra_params:
-        data.update(extra_params)
+async def call_gemini(page: bytes, page_index: int, client: genai.Client):
+    try:
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_bytes(data=page, mime_type="application/pdf"),
+                PROMPTS.get(page_index, PROMPTS["default"]),
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.0  # 低温度以保证数据提取的精确性
+            )
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"谷歌 AI 报错: {e}")
+    if not response.candidates:
+        raise HTTPException(status_code=500, detail="模型未返回任何候选结果。")
+    candidate = response.candidates[0]
+    if candidate.finish_reason != "STOP":
+        raise HTTPException(status_code=500, detail=f"模型生成中断。原因: {candidate.finish_reason}")
 
-    response = await client.post(url, params=params, data=data)
+    return json.loads(response.text)
 
-    if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code, detail=f"百度 API 报错: {response.text}")
-
-    return response.json()
 
 def to_clean_float(value):
     text = str(value).strip()
@@ -281,27 +268,27 @@ def to_clean_int(value):
     except ValueError:
         return 0
 
-def stamp_pdf(reader: PdfReader, contract_id: str, customer_name: str, total_value: float):
+def stamp_pdf(reader: PdfReader, contract_id: str, customer_name: str, total_value: float, box_2d_list: list):
     # 准备印章
-    stamp_width = 120
-    margin_right = 100
-    margin_bottom = 100
+    page_width = float(reader.pages[0].mediabox.width)
+    page_height = float(reader.pages[0].mediabox.height)
+
+    stamp_width = 110
 
     writer = PdfWriter()
-    stamp_path = "./stamp.png"
-    if not os.path.exists(stamp_path):
+    stamp_path = settings.STAMP_PATH
+    if not stamp_path.is_file():
         raise HTTPException(status_code=500, detail="服务器端印章文件丢失")
 
-    for page in reader.pages:
+    for i, page in enumerate(reader.pages):
         # reportlab 创建一个只包含印章的临时 PDF
-        page_width = float(page.mediabox.width)
-        page_height = float(page.mediabox.height)
         packet = io.BytesIO()
+
+        stamp_x, stamp_y = get_stamp_center(box_2d_list[i], page_width, page_height)
+        x_pos = min(stamp_x - stamp_width / 2 + 5, page_width - stamp_width) if i != 0 else min(stamp_x - stamp_width, page_width - stamp_width)
+        y_pos = max(stamp_y - stamp_width / 2, 0)
+
         can = canvas.Canvas(packet, pagesize=(page_width, page_height))
-
-        x_pos = page_width - stamp_width - margin_right
-        y_pos = margin_bottom
-
         can.drawImage(
             stamp_path,
             x_pos,
@@ -315,8 +302,8 @@ def stamp_pdf(reader: PdfReader, contract_id: str, customer_name: str, total_val
 
         # 将印章层合并到原页面
         packet.seek(0)
-        stamp_pdf = PdfReader(packet)
-        stamp_page = stamp_pdf.pages[0]
+        stamp_pdf_file = PdfReader(packet)
+        stamp_page = stamp_pdf_file.pages[0]
         page.merge_page(stamp_page)
 
         # 这一页添加到结果
@@ -337,40 +324,39 @@ def stamp_pdf(reader: PdfReader, contract_id: str, customer_name: str, total_val
 
     filename = f"{date_str}-{contract_sid}-{contract_date}-合同回传-{customer_name or '未知'}-{int(total_value)}.pdf"
 
-    file_path = os.path.join(TEMP_PDF, filename)
+    file_path = TEMP_PDF / filename
     with open(file_path, "wb") as f:
         writer.write(f)
 
     return filename
 
 
-def remove_file(path: str):
+def get_stamp_center(box_2d, page_width, page_height):
+    if not box_2d or len(box_2d) != 4:
+        raise HTTPException(status_code=500, detail="无效的 box_2d 数据")
+
+    ymin, xmin, ymax, xmax = box_2d
+
+    center_y_norm = (ymin + ymax) / 2
+    center_x_norm = (xmin + xmax) / 2
+
+    # 转换为实际页面尺寸 (X轴)
+    final_x = (center_x_norm / 1000) * page_width
+    # 转换为实际页面尺寸并翻转 Y 轴 (图片坐标原点在左上，PDF 坐标原点在左下)
+    image_y_abs = (center_y_norm / 1000) * page_height
+    final_y = page_height - image_y_abs
+
+    return final_x, final_y
+
+
+def remove_file(path: Path):
     """清理文件的后台任务"""
     try:
-        os.remove(path)
+        path.unlink(missing_ok=True)
         print(f"已删除临时文件: {path}")
     except Exception as e:
         print(f"删除文件失败: {e}")
 
-
-# token 缓存
-token_cache = {
-    "access_token": "token",
-    "expires_at": 0.0
-}
-def get_access_token():
-    """获取 AK，SK 生成的鉴权签名（Access Token）"""
-    curr_time = time.time()
-    if curr_time < token_cache['expires_at'] - 3600:
-        print('没刷新token')
-        return token_cache['access_token']
-    url = "https://aip.baidubce.com/oauth/2.0/token"
-    params = {"grant_type": "client_credentials", "client_id": API_KEY, "client_secret": SECRET_KEY}
-    res = requests.post(url, params=params).json()
-    token_cache['access_token'] = str(res.get("access_token"))
-    token_cache['expires_at'] = curr_time + float(res.get("expires_in"))
-    print(f"刷新token，截至{token_cache['expires_at']}")
-    return token_cache['access_token']
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001)
