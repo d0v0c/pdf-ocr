@@ -72,7 +72,7 @@ app = FastAPI(
 async def favicon():
     return FileResponse("static/favicon.png")
 
-@app.get("/ppp-ddd-fff")
+@app.get("/portal")
 async def index():
     return FileResponse('static/index.html')
 
@@ -113,14 +113,13 @@ async def extract_pdf(file: UploadFile = File(...), is_paid: str = Form(...)):
         raise HTTPException(status_code=400, detail="PDF 只有一页")
 
 
-    # 识别 pyPDF，分页提取 PDF
+    # 识别 pyPDF，分页调用 Gemini 提取 PDF
     tasks = []
     for i, page in enumerate(reader.pages):
         p_bytes = pdf_page_to_bytes(page)
         tasks.append(call_gemini(p_bytes, i, current_client))
 
     results_list = await asyncio.gather(*tasks)
-
 
     # 提取
     contract_id = results_list[0].get('contract_id')
@@ -129,6 +128,23 @@ async def extract_pdf(file: UploadFile = File(...), is_paid: str = Form(...)):
     address = results_list[0].get('address')
     customer_name = results_list[1].get('customer_name')
     box_2d_list = [res.get('box_2d') for res in results_list]
+
+    # 伪数据
+    #     contract_id = "H8741-01/251203S"
+    #     item_table = [
+    #     ['1', '轴', 'M-OVAS S - -/50', '2', '980', '1960', '6060', '', '磁县排水', '', '', '', '', '', '机器号: 160458'],
+    #     ['2', '螺母', 'M-OVAS S - -/50', '2', '175', '350', '6060', '', '磁县排水', '', '', '', '', '', '160458'],
+    #     ['3', '机械密封', '', '2', '1520', '3040', '6060', '', '磁县排水', '', '', '', '', '', '160458'],
+    #     ['4', '蝶形弹簧', '', '14', '18', '252', '6060', '', '磁县排水', '', '', '', '', '', '160458'],
+    #     ['5', '套', '', '2', '215', '430', '6060', '', '磁县排水', '', '', '', '', '', '160458'],
+    #     ['6', '内六角凹端紧定螺钉', '', '2', '2', '4', '6060', '', '磁县排水', '', '', '', '', '', '160458'],
+    #     ['7', '油嘴', '', '2', '3', '6', '6060', '', '磁县排水', '', '', '', '', '', '机器号 160458'],
+    #     ['8', '圆柱头螺钉', '', '6', '3', '18', '6060', '', '磁县排水', '', '', '', '', '', '160458'],
+    # ]
+    #     total_value = 6060
+    #     address = "江苏省南京市金陵区秣马路123号4幢5678室"
+    #     customer_name = "磁县排水"
+    #     box_2d_list = [[50.0, 50.0, 50.0, 50.0],[40.0, 40.0, 40.0, 40.0]]
 
 
     # 处理一下需要特殊处理的字符
