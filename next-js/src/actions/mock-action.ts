@@ -79,6 +79,8 @@ export async function mockAction({ file, isPaidMode }: { file: File, isPaidMode:
                 "地址": "广东省深圳府龙岗县海航乡南村瑞航路1号翻斗花园中心1幢1111室，牛爷爷13912312345"
             }
         ],
-        filename: file.name
+        filename: file.name,
+        dateStr: dateStr,
+        isPaidMode: isPaidMode,
     };
 }

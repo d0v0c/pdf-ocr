@@ -146,7 +146,7 @@ export const extractPdfAction = makeAction(async ({ file, isPaidMode }: { file: 
 async function callGemini(aiClient: GoogleGenAI, page: string, pageIndex: number) {
     try {
         const result = await aiClient.models.generateContent({
-            model: "gemini-2.5-flash",
+            model: "gemini-3-flash-preview",
             // [文件, 提示词]：相当于先给模型看资料，后给提示词。数据需要变成 base64.
             contents: [
                 { inlineData: {mimeType: 'application/pdf', data: page }},

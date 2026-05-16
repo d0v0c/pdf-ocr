@@ -27,13 +27,13 @@ import {motion, AnimatePresence} from "motion/react"
 import {Check} from "@/components/animate-ui/icons/check";
 import {TextMorph} from '@/components/ui/text-morph';
 import {Clipboard} from "@/components/animate-ui/icons/clipboard";
-import {useDropzone} from 'react-dropzone';
+import {FileRejection, useDropzone} from 'react-dropzone';
 import {CloudUpload} from "@/components/animate-ui/icons/cloud-upload";
 import {LoaderCircle} from "@/components/animate-ui/icons/loader-circle";
 import {extractPdfAction} from "@/actions/extract-pdf";
 
 export default function Main() {
-    const [isPaidMode, setIsPaidMode] = useState(false);
+    const [isPaidMode, setIsPaidMode] = useState(true);
     const [isUploading, startUploading] = useTransition();
     const [isHovered, setIsHovered] = useState(false);
     const [isCopied, setIsCopied] = useState(false);
@@ -44,6 +44,34 @@ export default function Main() {
     // 要隐藏的列
     const hiddenColumns = ["签订日期", "票款", "占", "位", "空", "白", "列"];
     const visibleHeaders = headers.filter(h => !hiddenColumns.includes(h));
+
+    // 下载
+    const triggerDownload = async (filename: string) => {
+        const url = `/api/downloads/${filename}`;
+        // try {
+        //   // 尝试现代 API
+        //   if (window.showSaveFilePicker) {
+        //     const handle = await window.showSaveFilePicker({
+        //       suggestedName: filename,
+        //       types: [{ description: "PDF Document", accept: { "application/pdf": [".pdf"] } }],
+        //     });
+        //     const resp = await fetch(url);
+        //     const blob = await resp.blob();
+        //     const writable = await handle.createWritable();
+        //     await writable.write(blob);
+        //     await writable.close();
+        //     return;
+        //   }
+        // } catch (e) {}
+
+        // 传统下载
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
 
     // 1. 拖拽上传逻辑
     // useDropzone 的回调函数，接收文件数组
@@ -81,11 +109,29 @@ export default function Main() {
         });
     }, [isPaidMode]);
 
+    const onDropRejected = useCallback((fileRejections: FileRejection[]) => {
+        const rejection = fileRejections[0];
+        const error = rejection.errors[0];
+
+        if (error.code === 'file-too-large') {
+            const sizeMB = (rejection.file.size / 1024 / 1024).toFixed(1);
+            toast.error(`文件过大（${sizeMB}MB），上限 15MB`, {position: "bottom-center"});
+        } else if (error.code === 'file-invalid-type') {
+            toast.error('只支持 PDF 文件', {position: "bottom-center"});
+        } else if (error.code === 'too-many-files') {
+            toast.error('一次只能上传一个文件', {position: "bottom-center"});
+        } else {
+            toast.error(`文件无法接受：${error.message}`, {position: "bottom-center"});
+        }
+    }, []);
+
     // react-dropzone 核心 Hook，取出 react-dropzone 关键函数
     const {getRootProps, getInputProps, isDragActive, isDragReject} = useDropzone({
         onDrop,
+        onDropRejected,
         accept: {'application/pdf': ['.pdf']},   // 严格限制只收 PDF
         maxFiles: 1,                             // 每次只能传 1 个
+        maxSize: 15 * 1024 * 1024,               // 15MB 上限
         disabled: isUploading                    // 上传中直接锁死整个组件，防止重复投递
     });
 
@@ -116,34 +162,6 @@ export default function Main() {
             title: "点击 或 将 PDF 拖拽至此上传",
         };
     })();
-
-    // 下载
-    const triggerDownload = async (filename: string) => {
-        const url = `/api/downloads/${filename}`;
-        // try {
-        //   // 尝试现代 API
-        //   if (window.showSaveFilePicker) {
-        //     const handle = await window.showSaveFilePicker({
-        //       suggestedName: filename,
-        //       types: [{ description: "PDF Document", accept: { "application/pdf": [".pdf"] } }],
-        //     });
-        //     const resp = await fetch(url);
-        //     const blob = await resp.blob();
-        //     const writable = await handle.createWritable();
-        //     await writable.write(blob);
-        //     await writable.close();
-        //     return;
-        //   }
-        // } catch (e) {}
-
-        // 传统下载
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = filename;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-    };
 
     // 2. 校验价格 (因为有 isRowError 这种由 State 数据计算出的 computed 数据，所以用 useMemo)
     const validation = useMemo(() => {

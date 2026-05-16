@@ -1,5 +1,5 @@
 "use client";
-// 和 Main.tex 一样，仅仅是把 Action 换成了 mockAction，去除了下载功能
+// 和 Main.tex 一样，仅仅是把 Action 换成了 mockAction，去除了下载功能，增加了 Demo 说明
 
 import {useState, useMemo, useCallback, useTransition, useEffect} from "react";
 import {toast} from "sonner"
@@ -11,12 +11,20 @@ import {motion, AnimatePresence} from "motion/react"
 import {Check} from "@/components/animate-ui/icons/check";
 import {TextMorph} from '@/components/ui/text-morph';
 import {Clipboard} from "@/components/animate-ui/icons/clipboard";
-import {useDropzone} from 'react-dropzone';
+import {FileRejection, useDropzone} from 'react-dropzone';
 import {CloudUpload} from "@/components/animate-ui/icons/cloud-upload";
 import {LoaderCircle} from "@/components/animate-ui/icons/loader-circle";
 import {mockAction} from "@/actions/mock-action";
+import {FileText, Info} from 'lucide-react';
 
 export default function PdfExtractPage() {
+    // Demo 展示：存储后台元数据
+    const [requestMeta, setRequestMeta] = useState<{
+        filename: string;
+        dateStr: string;
+        isPaidMode: boolean;
+    } | null>(null);
+
     const [isPaidMode, setIsPaidMode] = useState(false);
     const [isUploading, startUploading] = useTransition();
     const [isHovered, setIsHovered] = useState(false);
@@ -28,13 +36,6 @@ export default function PdfExtractPage() {
     // 要隐藏的列
     const hiddenColumns = ["签订日期", "票款", "占", "位", "空", "白", "列"];
     const visibleHeaders = headers.filter(h => !hiddenColumns.includes(h));
-
-
-    useEffect(() => {
-        const dummyFile = new File(["dummy content"], "dummy.pdf", { type: "application/pdf" });
-        onDrop([dummyFile]);
-    }, []); // 空依赖数组 [] 表示只在页面打开时执行一次
-
 
     // 1. 拖拽上传逻辑
     // useDropzone 的回调函数，接收文件数组
@@ -56,15 +57,45 @@ export default function PdfExtractPage() {
                     return newRow;
                 });
                 setTableData(formattedData);
+
+                // Demo 展示：请求元数据
+                setRequestMeta({
+                    filename: data.filename,
+                    dateStr: data.dateStr,
+                    isPaidMode: data.isPaidMode,
+                });
             }
         });
     }, [isPaidMode]);
 
+    useEffect(() => {
+        const dummyFile = new File(["dummy content"], "dummy.pdf", {type: "application/pdf"});
+        onDrop([dummyFile]);
+    }, []); // 空依赖数组 [] 表示只在页面打开时执行一次
+
+    const onDropRejected = useCallback((fileRejections: FileRejection[]) => {
+        const rejection = fileRejections[0];
+        const error = rejection.errors[0];
+
+        if (error.code === 'file-too-large') {
+            const sizeMB = (rejection.file.size / 1024 / 1024).toFixed(1);
+            toast.error(`文件过大（${sizeMB}MB），上限 15MB`, {position: "bottom-center"});
+        } else if (error.code === 'file-invalid-type') {
+            toast.error('只支持 PDF 文件', {position: "bottom-center"});
+        } else if (error.code === 'too-many-files') {
+            toast.error('一次只能上传一个文件', {position: "bottom-center"});
+        } else {
+            toast.error(`文件无法接受：${error.message}`, {position: "bottom-center"});
+        }
+    }, []);
+
     // react-dropzone 核心 Hook，取出 react-dropzone 关键函数
     const {getRootProps, getInputProps, isDragActive, isDragReject} = useDropzone({
         onDrop,
+        onDropRejected,
         accept: {'application/pdf': ['.pdf']},   // 严格限制只收 PDF
         maxFiles: 1,                             // 每次只能传 1 个
+        maxSize: 15 * 1024 * 1024,               // 15MB 上限
         disabled: isUploading                    // 上传中直接锁死整个组件，防止重复投递
     });
 
@@ -73,25 +104,25 @@ export default function PdfExtractPage() {
         // 状态 1：正在上传 (冻结样式)
         if (isUploading) return {
             wrapperClass: "border-slate-300 bg-slate-50 text-blue-600 opacity-50 cursor-not-allowed",
-            icon: <LoaderCircle animateOnView className="h-12 w-12" />,
+            icon: <LoaderCircle animateOnView className="h-12 w-12"/>,
             title: "正在解析 PDF...",
         };
         // 状态 2：拖错文件了 (红色警告)
         if (isDragReject) return {
             wrapperClass: "border-red-400 bg-red-50 text-red-600",
-            icon: <CloudUpload animate={isDragReject} className="h-12 w-12" />,
+            icon: <CloudUpload animate={isDragReject} className="h-12 w-12"/>,
             title: "只支持 PDF，一次上传一个",
         };
         // 状态 3：拖入文件，准备松手 (蓝色高亮)
         if (isDragActive) return {
             wrapperClass: "border-blue-500 bg-blue-50 text-blue-600",
-            icon: <CloudUpload animate={isDragActive} className="h-12 w-12" />,
+            icon: <CloudUpload animate={isDragActive} className="h-12 w-12"/>,
             title: "松开上传",
         };
         // 状态 4：默认状态
         return {
             wrapperClass: "border-slate-300 bg-slate-50 text-slate-600 hover:border-blue-400 hover:bg-slate-100",
-            icon: <CloudUpload animate={isHovered} className="h-12 w-12 text-slate-500" />,
+            icon: <CloudUpload animate={isHovered} className="h-12 w-12 text-slate-500"/>,
             title: "点击 或 将 PDF 拖拽至此上传",
         };
     })();
@@ -181,6 +212,25 @@ export default function PdfExtractPage() {
                 <div className="relative text-center">
                     {/* 标题 */}
                     <h1 className="text-3xl font-bold tracking-tight text-slate-900 mb-6">PDF 识别解析提取</h1>
+                    {/* Demo 展示：副标题声明 */}
+                    <div className="mb-6 flex justify-center">
+                        <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-orange-50 text-orange-800 text-sm font-medium">
+                            <Info className="w-4 h-4 flex-shrink-0" />
+                            <span>
+                                  Demo · 仅展示前端逻辑，后端返回 mock 数据 ·
+                                  <a
+                                      href="https://github.com/d0v0c/pdf-ocr"
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="ml-1.5 underline underline-offset-2 hover:text-orange-900"
+                                  >
+                                      GitHub 查看源代码 ↗
+                                  </a>
+                              </span>
+                        </div>
+                    </div>
+
+
                     {/* 付费模式开关 */}
                     <div className={cn("absolute right-0 top-0 flex gap-4 rounded-xl border px-4 py-3 duration-500",
                         isPaidMode
@@ -203,14 +253,14 @@ export default function PdfExtractPage() {
                 </div>
 
                 {/* 拖拽上传区 */}
-                <div {...getRootProps()}    // 注入属性，把 div 变成 Dropzone
+                <div {...getRootProps()} // 注入属性，把 div 变成 Dropzone
                      onMouseEnter={() => setIsHovered(true)}
                      onMouseLeave={() => setIsHovered(false)}
                      className={cn(
                          "flex cursor-pointer flex-col items-center gap-4 rounded-xl border-2 border-dashed p-10 text-center duration-200 text-sm font-semibold",
                          uiState.wrapperClass)}
                 >
-                    <input {...getInputProps()} />  {/* 注入属性，用 input 处理点击事件 */}
+                    <input {...getInputProps()} /> {/* 注入属性，用 input 处理点击事件 */}
                     {uiState.icon}
                     {uiState.title}
                 </div>
@@ -218,6 +268,33 @@ export default function PdfExtractPage() {
                 {/* 数据提取后加载区 */}
                 {tableData.length > 0 && (
                     <div className="animate-in slide-in-from-top-5 duration-500 space-y-4 ">
+
+                        {/* Demo 展示：元数据 header */}
+                        {requestMeta && (
+                            <div className="bg-orange-50 rounded-lg py-3 pr-4 space-y-1.5">
+                                {/* Row 1: 时间 + 模式 */}
+                                <div className="ml-16 flex items-center gap-2.5 text-xs">
+              <span className="text-slate-500 tabular-nums">
+                  {requestMeta.dateStr}
+              </span>
+                                    <span className={cn(
+                                        "px-2 py-0.5 rounded-full font-medium",
+                                        requestMeta.isPaidMode
+                                            ? "bg-orange-100 text-orange-700"
+                                            : "bg-slate-100 text-slate-600"
+                                    )}>
+                  {requestMeta.isPaidMode ? "付费模式" : "免费模式"}
+              </span>
+                                </div>
+                                {/* Row 2: 文件名 */}
+                                <div className="ml-16 flex items-center gap-1.5 text-sm text-slate-700 font-medium">
+                                    <FileText className="w-4 h-4 text-slate-400 flex-shrink-0"/>
+                                    <span className="truncate">{requestMeta.filename}</span>
+                                </div>
+                            </div>
+                        )}
+
+
                         {/* 工具栏 */}
                         <div className="flex items-baseline justify-between border-b pb-4">
                             {/* 校验结果 */}
