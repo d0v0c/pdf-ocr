@@ -8,8 +8,8 @@ dayjs.extend(timezone);
 
 export async function saveLog(level: 'INFO' | 'ERROR', payload: string, duration: number) {
     try {
-        const timeStr = dayjs().tz("Asia/Shanghai").format('YYYY-MM-DD HH:mm:ss');
-        const logEntry = JSON.stringify({ timeStr, duration, level, payload }) + '\n';
+        const time = dayjs().tz("Asia/Shanghai").format('YYYY-MM-DD HH:mm:ss');
+        const logEntry = JSON.stringify({ time, duration, level, payload }) + '\n';
 
         // 存储到项目根目录的 logs 文件夹下
         const logDir = path.join(process.cwd(), 'logs');

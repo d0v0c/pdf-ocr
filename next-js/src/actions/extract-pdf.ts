@@ -9,7 +9,6 @@ import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
 import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 
 const PROMPTS = `Analyze the PDF and extract the required details. Follow the provided JSON schema structure and its field descriptions. Keep the extracted content in its original language (Chinese).`;
 
@@ -51,8 +50,7 @@ const SchemaDefault = z.object({
         Return coordinates in a 0-1000 normalized format as [ymin, xmin, ymax, xmax].
         Example: [800,700,800,760].
          - Exclude Footers: Ignore page numbers, technical markers or company info at the very bottom edge.
-         - Avoid Occlusion: The text must be not overlapped by any stamp or seal.
-         - Clearance: There must be a vertical or horizontal gap (at least 10% of the page width) between this text and existing stamp. If the text is too close to the stamp, choose a text a little bit up or right.`),
+         - Clearance: There must be a vertical or horizontal gap (at least 25% of the page width) between this text and existing stamp. If the text is too close to the stamp, choose a text up or right.`),
 });
 const JSON_SCHEMA: Record<number, z.ZodTypeAny> = {
     0: SchemaPage0,
@@ -61,6 +59,9 @@ const JSON_SCHEMA: Record<number, z.ZodTypeAny> = {
 
 const clientFree = new GoogleGenAI({apiKey: process.env.GOOGLE_API_KEY_FREE});
 const clientPaid = new GoogleGenAI({apiKey: process.env.GOOGLE_API_KEY_PAID});
+// 免费模式单一模型；付费模式按顺序降级：失败则尝试下一个
+const FREE_MODELS = ["gemini-3-flash-preview"];
+const PAID_MODELS = ["gemini-3.1-flash-lite", "gemini-3.5-flash", "gemini-3.1-pro-preview"];
 const stampPath = path.resolve(process.cwd(), process.env.STAMP_PATH || "stamp.png");
 const TEMP_PDF_DIR = path.resolve(process.cwd(), "temp-pdfs");
 fs.mkdir(TEMP_PDF_DIR, { recursive: true }).catch(console.error);
@@ -68,10 +69,9 @@ fs.mkdir(TEMP_PDF_DIR, { recursive: true }).catch(console.error);
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-export const extractPdfAction = makeAction(async ({ file, isPaidMode }: { file: File, isPaidMode: boolean }, setLogPayload) => {
+export const extractPdfAction = makeAction(async ({ file, isPaidMode }: { file: File, isPaidMode: boolean }, appendLogPayload) => {
     // console.log(`接收到的模式: ${isPaidMode ? "paid" : "free"}`);
-    let log: string = "";
-    log += `模式：${isPaidMode ? "paid" : "free"}`;
+    appendLogPayload(`文件：${file.name} | 模式：${isPaidMode ? "paid" : "free"}`);
     // 将 Web File 转为 Node.js Buffer
     // 类似 byte[] bytes = Files.readAllBytes()
     const arrayBuffer = await file.arrayBuffer();
@@ -86,10 +86,11 @@ export const extractPdfAction = makeAction(async ({ file, isPaidMode }: { file: 
 
     const pageCount = pdfDoc.getPageCount();
     if (pageCount < 2) throw new Error("PDF 只有一页");
-    log += ` | 页数：${pageCount}`;
+    appendLogPayload(` | 页数：${pageCount}`);
 
     // 2. 分页调用 Gemini
     const aiClient = isPaidMode ? clientPaid : clientFree;
+    const models = isPaidMode ? PAID_MODELS : FREE_MODELS;
 
     const tasks = [];
     for (let i = 0; i < pageCount; i++) {
@@ -99,7 +100,7 @@ export const extractPdfAction = makeAction(async ({ file, isPaidMode }: { file: 
         tempDoc.addPage(copiedPage);
         const singlePage = await tempDoc.saveAsBase64();
 
-        tasks.push(callGemini(aiClient, singlePage, i));
+        tasks.push(callGemini(aiClient, models, singlePage, i, appendLogPayload));
     }
     // 等待所有页面解析完毕
     const resultsList = await Promise.all(tasks);
@@ -108,7 +109,7 @@ export const extractPdfAction = makeAction(async ({ file, isPaidMode }: { file: 
     const firstPage = resultsList[0] as z.infer<typeof SchemaPage0>;
     const secondPage = resultsList[1] as z.infer<typeof SchemaPage1>;
     const box2dList = resultsList.map(res => res.box2d);
-    log += ` | box2d：${JSON.stringify(box2dList)}`;
+    appendLogPayload(` | box2d：${JSON.stringify(box2dList)}`);
     // 处理一下需要特殊处理的字符
     firstPage.itemTable.forEach(res => res.commodity.replace("NMO", "NM0"));
 
@@ -133,7 +134,6 @@ export const extractPdfAction = makeAction(async ({ file, isPaidMode }: { file: 
     // 5. 给 PDF 盖章并保存到磁盘
     const filename = await stampPdfAndSave(pdfDoc, firstPage.contractId, secondPage.customerName, firstPage.totalValue, box2dList);
 
-    setLogPayload(log);
     return {
         table: finalData,
         filename
@@ -142,28 +142,37 @@ export const extractPdfAction = makeAction(async ({ file, isPaidMode }: { file: 
 
 
 
-// 调用大模型
-async function callGemini(aiClient: GoogleGenAI, page: string, pageIndex: number) {
-    try {
-        const result = await aiClient.models.generateContent({
-            model: "gemini-3-flash-preview",
-            // [文件, 提示词]：相当于先给模型看资料，后给提示词。数据需要变成 base64.
-            contents: [
-                { inlineData: {mimeType: 'application/pdf', data: page }},
-                { text: PROMPTS }
-            ],
-            config: {
-                responseMimeType: "application/json",
-                responseJsonSchema: zodToJsonSchema(JSON_SCHEMA[pageIndex] ?? SchemaDefault),
-                temperature: 0,
-            },
-        });
-        const text = result.text;
-        if (typeof text !== 'string') {throw new Error("模型无返回内容");}
-        return JSON.parse(text);
-    } catch (e) {
-        throw new Error(`谷歌 AI 报错: ${e}`);
+// 调用大模型：按 models 顺序依次尝试，成功即返回，全部失败才抛错
+async function callGemini(aiClient: GoogleGenAI, models: string[], page: string, pageIndex: number, appendLogPayload: (payload: string) => void) {
+    // 只在解析第一页时记录降级过程，避免每页都刷日志
+    const shouldLog = pageIndex === 0;
+    let lastError: unknown;
+    for (const model of models) {
+        try {
+            if (shouldLog) appendLogPayload(` | 尝试 ${model}`);
+            const result = await aiClient.models.generateContent({
+                model,
+                // [文件, 提示词]：相当于先给模型看资料，后给提示词。数据需要变成 base64.
+                contents: [
+                    { inlineData: {mimeType: 'application/pdf', data: page }},
+                    { text: PROMPTS }
+                ],
+                config: {
+                    responseMimeType: "application/json",
+                    responseJsonSchema: z.toJSONSchema(JSON_SCHEMA[pageIndex] ?? SchemaDefault),
+                    temperature: 0,
+                },
+            });
+            const text = result.text;
+            if (typeof text !== 'string') {throw new Error("模型无返回内容");}
+            return JSON.parse(text);
+        } catch (e) {
+            lastError = e;
+            if (shouldLog) appendLogPayload(`（失败：${e}）`);
+            // 当前模型失败，尝试下一个
+        }
     }
+    throw new Error(`谷歌 AI 报错: ${lastError}`);
 }
 
 // 盖章并保存到磁盘
@@ -214,11 +223,11 @@ async function stampPdfAndSave(
         const yPos = Math.max(absoluteY - stampHeight / 2, 0);
 
         page.drawImage(stampImage, {
-            x: xPos,
+            x: xPos + 50,
             y: yPos,
             width: stampWidth,
             height: stampHeight,
-            opacity: 0.9, // 给印章加一点真实的透明度
+            opacity: 0.9, // 给印章加一点透明度
         });
     }
 
